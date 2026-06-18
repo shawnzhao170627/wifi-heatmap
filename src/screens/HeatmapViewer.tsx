@@ -18,31 +18,26 @@ import {
 } from '../services/HeatmapEngine';
 import type { HeatmapCell } from '../types';
 
-const SCALE = 1.5;
+const SCALE = 2;
 const CELL = 25; // cm, must match GRID_SPACING_CM in HeatmapEngine
-const OPACITY_MIN = 100;
-const OPACITY_MAX = 200;
 
 export default function HeatmapViewer({ route, navigation }: any) {
   const { projectId } = route.params ?? {};
   const project = useStore(
     useCallback((s) => s.projects.find((p) => p.id === projectId) ?? null, [projectId]),
   );
-  const setHeatmap = useStore((s) => s.setHeatmap);
 
   const canvasW = Dimensions.get('window').width;
   const canvasH = Dimensions.get('window').height - 250;
 
   const heatmapCells = useMemo(() => {
     if (!project) return [];
-    const samples = project.samples;
+    const samples = project.samples ?? [];
     if (samples.length === 0) return [];
 
     const grid = buildGrid(project.floorPlan);
-    const cells = interpolate(grid, samples);
-    setHeatmap(projectId, cells);
-    return cells;
-  }, [project, projectId, setHeatmap]);
+    return interpolate(grid, samples);
+  }, [project]);
 
   if (!project) {
     return (

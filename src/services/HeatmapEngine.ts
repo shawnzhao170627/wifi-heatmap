@@ -3,7 +3,7 @@ import type { WifiSample, HeatmapCell, FloorPlan, Room } from '../types';
 const GRID_SPACING_CM = 25; // 25cm per cell
 const IDW_POWER = 2; // inverse distance squared
 const MAX_SEARCH_RADIUS_CM = 500; // max distance to consider a sample
-const MIN_SAMPLES_FOR_VALID_CELL = 2;
+const MIN_SAMPLES_FOR_VALID_CELL = 1;
 
 /**
  * Build a grid of HeatmapCells covering all rooms in the floor plan.

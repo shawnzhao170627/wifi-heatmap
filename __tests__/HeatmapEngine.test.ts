@@ -51,8 +51,9 @@ describe('interpolate', () => {
     // Exact match
     expect(result[0].rssi).toBe(-40);
     expect(result[0].sampleCount).toBe(1);
-    // Nearby cells get interpolated values
-    expect(result[1].rssi).toBeLessThan(-40);
+    // Nearby cells get interpolated from the single sample
+    expect(result[1].rssi).toBe(-40);
+    expect(result[1].sampleCount).toBe(1);
   });
 
   it('returns original cells when no samples', () => {

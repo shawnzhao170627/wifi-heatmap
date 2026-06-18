@@ -41,10 +41,12 @@ export default function WifiScannerScreen({ route, navigation }: any) {
   const canvasW = Dimensions.get('window').width;
   const canvasH = Dimensions.get('window').height - 280;
 
-  // Permission check on mount
+  // Permission check + auto-start on mount
   useEffect(() => {
     wifiRef.current.requestPermission().then((granted) => {
-      if (!granted) {
+      if (granted) {
+        doStartScan();
+      } else {
         Alert.alert(
           '需要位置权限',
           'Android 系统要求获取位置权限才能扫描 WiFi 信号。\n\n请在系统设置中允许本应用获取「精确位置」。',
@@ -117,23 +119,31 @@ export default function WifiScannerScreen({ route, navigation }: any) {
     );
   }, [plan, project, projectId, updateFloorPlan]);
 
-  const startScanning = useCallback(() => {
-    if (!project) return;
+  // --- LED-like indicator for feed-forward display ---
+  // Even before first WiFi sample returns, we show compass heading
+  const [feedRssi, setFeedRssi] = useState<number | null>(null);
+  const [feedRssiTs, setFeedRssiTs] = useState(0);
 
-    // Initialize PDR: use router position if known, otherwise room center
+  // Timer that reads current state from refs (avoids stale closures)
+  const doStartScan = useCallback(() => {
+    const p = useStore.getState().projects.find((pr) => pr.id === projectId);
+    if (!p) return;
+
+    const rp = p.floorPlan.routerPosition;
+    const fp = p.floorPlan;
     let startX = 200;
     let startY = 200;
-    if (routerPos) {
-      startX = routerPos.x;
-      startY = routerPos.y;
-    } else if (plan && plan.rooms.length > 0) {
-      const firstRoom = plan.rooms[0];
-      startX = firstRoom.x + firstRoom.width / 2;
-      startY = firstRoom.y + firstRoom.height / 2;
+    if (rp) {
+      startX = rp.x;
+      startY = rp.y;
+    } else if (fp.rooms.length > 0) {
+      startX = fp.rooms[0].x + fp.rooms[0].width / 2;
+      startY = fp.rooms[0].y + fp.rooms[0].height / 2;
     }
 
-    pdrRef.current = new PedestrianTracker(startX, startY, 0);
-    pdrRef.current.start();
+    const tracker = pdrRef.current ?? new PedestrianTracker(startX, startY, 0);
+    pdrRef.current = tracker;
+    tracker.start();
 
     updateScanSession({
       status: 'scanning',
@@ -146,7 +156,7 @@ export default function WifiScannerScreen({ route, navigation }: any) {
 
     setIsScanning(true);
 
-    // Periodic WiFi scan
+    if (scanTimerRef.current) clearInterval(scanTimerRef.current);
     scanTimerRef.current = setInterval(async () => {
       const results = await wifiRef.current.scan();
       const pdr = pdrRef.current?.getState();
@@ -160,10 +170,12 @@ export default function WifiScannerScreen({ route, navigation }: any) {
       );
 
       if (samples.length > 0) {
-        addSamples(projectId, samples);
+        const { addSamples: add, updateScanSession: upd } = useStore.getState();
+        add(projectId, samples);
         const strongest = samples.reduce((a, b) => (a.rssi > b.rssi ? a : b));
         setRssi(strongest.rssi);
-        updateScanSession({
+        setFeedRssiTs(Date.now());
+        upd({
           currentPosition: { x: pdr.x, y: pdr.y },
           currentHeading: pdr.heading,
           stepCount: pdr.stepCount,
@@ -171,39 +183,18 @@ export default function WifiScannerScreen({ route, navigation }: any) {
         });
       }
     }, 2000);
-  }, [project, projectId, routerPos, addSamples, updateScanSession]);
+  }, [projectId, updateScanSession]);
 
   const pauseScanning = useCallback(() => {
     pdrRef.current?.stop();
-    if (scanTimerRef.current) clearInterval(scanTimerRef.current);
+    if (scanTimerRef.current) { clearInterval(scanTimerRef.current); scanTimerRef.current = null; }
     setIsScanning(false);
     updateScanSession({ status: 'paused' });
   }, [updateScanSession]);
 
   const resumeScanning = useCallback(() => {
-    pdrRef.current?.start();
-    setIsScanning(true);
-    updateScanSession({ status: 'scanning' });
-    // Re-create scan timer
-    scanTimerRef.current = setInterval(async () => {
-      const results = await wifiRef.current.scan();
-      const pdr = pdrRef.current?.getState();
-      if (!pdr) return;
-      const samples = wifiRef.current.createSamples(
-        results,
-        Math.round(pdr.x),
-        Math.round(pdr.y),
-        'pdr_high',
-      );
-      if (samples.length > 0) {
-        addSamples(projectId, samples);
-        updateScanSession({
-          currentPosition: { x: pdr.x, y: pdr.y },
-          lastSampleTime: Date.now(),
-        });
-      }
-    }, 2000);
-  }, [projectId, addSamples, updateScanSession]);
+    doStartScan();
+  }, [doStartScan]);
 
   const stopScanning = useCallback(() => {
     cleanup();

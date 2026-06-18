@@ -46,8 +46,8 @@ interface ViewTransform {
 
 export default function FloorPlanEditor({ route, navigation }: any) {
   const { projectId } = route.params ?? {};
-  const project = useStore(
-    useCallback((s) => s.projects.find((p) => p.id === projectId) ?? null, [projectId]),
+  const project = useStore((s) =>
+    s.projects.find((p) => p.id === projectId) ?? null,
   );
   const updateFloorPlan = useStore((s) => s.updateFloorPlan);
 
@@ -220,6 +220,24 @@ export default function FloorPlanEditor({ route, navigation }: any) {
   const zoomOut = () => updateTransform({ scale: Math.max(MIN_ZOOM, scale / 1.25) });
   const resetView = () => updateTransform({ scale: 1, offsetX: 0, offsetY: 0 });
 
+  // Fit all rooms in viewport
+  const fitToRooms = () => {
+    if (rooms.length === 0) return;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const r of rooms) {
+      if (r.x < minX) minX = r.x;
+      if (r.y < minY) minY = r.y;
+      if (r.x + r.width > maxX) maxX = r.x + r.width;
+      if (r.y + r.height > maxY) maxY = r.y + r.height;
+    }
+    const contentW = (maxX - minX + 100) * BASE_SCALE; // +100cm padding
+    const contentH = (maxY - minY + 100) * BASE_SCALE;
+    const fitScale = Math.min(canvasW / contentW, canvasH / contentH, 2);
+    const offX = canvasW / 2 - ((minX + maxX) / 2) * BASE_SCALE * fitScale;
+    const offY = canvasH / 2 - ((minY + maxY) / 2) * BASE_SCALE * fitScale;
+    updateTransform({ scale: fitScale, offsetX: offX, offsetY: offY });
+  };
+
   return (
     <View style={styles.container}>
       {/* Toolbar */}
@@ -237,6 +255,9 @@ export default function FloorPlanEditor({ route, navigation }: any) {
           </TouchableOpacity>
           <TouchableOpacity onPress={zoomIn} style={styles.zoomBtn}>
             <Text style={styles.zoomBtnText}>+</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={fitToRooms} style={styles.zoomBtn}>
+            <Text style={styles.zoomBtnText}>⊡</Text>
           </TouchableOpacity>
           <TouchableOpacity onPress={addRoom} style={styles.toolAction}>
             <Text style={styles.toolActionText}>+ 房间</Text>
