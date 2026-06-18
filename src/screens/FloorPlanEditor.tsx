@@ -211,7 +211,6 @@ export default function FloorPlanEditor({ route, navigation }: any) {
 
   const goToScan = () => {
     if (rooms.length === 0) { Alert.alert('提示', '请先添加至少一个房间'); return; }
-    if (!routerPos) { Alert.alert('提示', '请先标记路由器位置'); return; }
     navigation.navigate('WifiScanner', { projectId });
   };
 
