@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+
+# React Native
+android/app/build/
+android/.gradle/
+android/build/
+android/captures/
+ios/build/
+ios/Pods/
+
+# Metro
+.metro-health-check*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+local.properties
+
+# Testing
+coverage/
+
+# Temporary
+*.log
+tmp/
+
+# Android build caches
+android/app/.cxx/
+android/.idea/
+*.iml
+*.hprof
+
+# Gemfile lock
+Gemfile.lock
