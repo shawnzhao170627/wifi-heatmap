@@ -9,19 +9,19 @@ export interface WifiScanResult {
   frequency: number;
 }
 
-const SCAN_INTERVAL_MS = 30000; // Full scan only every 30s (Android throttle: 4 per 2 min)
-const RSSI_REFRESH_MS = 2000; // Connected RSSI refresh interval
+/** Debug log ring buffer — visible in UI when results aren't flowing */
+export let debugLog: string[] = [];
+function log(msg: string) {
+  const line = `${new Date().toLocaleTimeString()} ${msg}`;
+  debugLog.push(line);
+  if (debugLog.length > 20) debugLog.shift();
+  console.log('[WifiScanner]', line);
+}
 
-/**
- * WiFi 信号采集器。
- *
- * Android 9+ 限制前台 App 每 2 分钟只能发起 4 次系统级扫描。
- * 因此设计为：每 2 秒用 getCurrentSignalStrength() 获取当前连接 WiFi 的 RSSI（无限制），
- * 每 30 秒进行一次完整周边 AP 扫描。
- */
+const FULL_SCAN_INTERVAL_MS = 30000;
+
 export class WifiScanner {
-  private lastScanTime = 0;
-  private lastRssiRefreshTime = 0;
+  private lastFullScanTime = 0;
   private cachedFullResults: WifiScanResult[] = [];
 
   async requestPermission(): Promise<boolean> {
@@ -39,6 +39,7 @@ export class WifiScanner {
             buttonNegative: '拒绝',
           },
         );
+        log(`location permission: ${granted}`);
         return granted === 'granted';
       }
       const granted = await PermissionsAndroid.request(
@@ -50,140 +51,149 @@ export class WifiScanner {
           buttonNegative: '拒绝',
         },
       );
+      log(`location permission: ${granted}`);
       return granted === 'granted';
-    } catch (err) {
-      console.warn('Permission request failed:', err);
+    } catch (err: any) {
+      log(`permission error: ${err?.message || String(err)}`);
       return false;
     }
   }
 
   /**
-   * 主扫描方法。返回当前可获取的所有 WiFi AP 信息。
-   * 高频调用时有智能节流：短间隔用当前连接 RSSI，长间隔做完整扫描。
+   * Called every 2s by the scanner screen timer.
+   * Returns zero or more WiFi scan results.
    */
   async scan(): Promise<WifiScanResult[]> {
     const now = Date.now();
+    const results: WifiScanResult[] = [];
 
-    // Every 2s: fast refresh from current connection (no throttle)
-    if (now - this.lastRssiRefreshTime >= RSSI_REFRESH_MS) {
-      const fastRssi = await this.getConnectedRssi();
-      this.lastRssiRefreshTime = now;
+    // 1. Fast RSSI from current connection (works every call, no Android throttle)
+    try {
+      const conn = await this.getConnectedRssi();
+      if (conn) {
+        results.push(conn);
+      }
+    } catch (err: any) {
+      log(`connected rssi error: ${err?.message || String(err)}`);
+    }
 
-      // Full scan every 30s (within Android throttle limit)
-      if (now - this.lastScanTime >= SCAN_INTERVAL_MS) {
-        this.lastScanTime = now;
+    // 2. Full scan every 30s
+    if (now - this.lastFullScanTime >= FULL_SCAN_INTERVAL_MS) {
+      this.lastFullScanTime = now;
+      try {
         const full = await this.doFullScan();
         if (full.length > 0) {
           this.cachedFullResults = full;
+          log(`full scan: ${full.length} APs`);
         }
+      } catch (err: any) {
+        log(`full scan error: ${err?.message || String(err)}`);
       }
-
-      // Merge: connected RSSI + cached full scan results
-      return this.mergeResults(fastRssi, this.cachedFullResults);
     }
 
-    return [];
+    // 3. Merge: connection RSSI + cached full scan
+    const merged = this.mergeResults(results, this.cachedFullResults);
+    if (merged.length === 0) {
+      log('scan: 0 results');
+    }
+    return merged;
   }
 
-  /**
-   * 从当前连接的 WiFi 获取 RSSI（不受 Android 扫描频率限制）。
-   */
   private async getConnectedRssi(): Promise<WifiScanResult | null> {
-    try {
-      const [ssid, rssi, bssid, freq] = await Promise.all([
-        WifiManager.getCurrentWifiSSID().catch(() => ''),
-        WifiManager.getCurrentSignalStrength().catch(() => NaN),
-        WifiManager.getBSSID().catch(() => ''),
-        WifiManager.getFrequency().catch(() => 2400),
-      ]);
-      if (ssid && !isNaN(rssi) && rssi > -100 && rssi < 0) {
-        return {
-          ssid,
-          bssid,
-          rssi: typeof rssi === 'number' ? rssi : Number(rssi),
-          frequency: typeof freq === 'number' ? freq : Number(freq) || 2400,
-        };
+    // try each call individually — Promise.all fails if any one throws
+    let ssid = '';
+    let rssiRaw: any = NaN;
+    let bssid = '';
+    let freqRaw: any = NaN;
+
+    try { ssid = await WifiManager.getCurrentWifiSSID(); } catch (e) {}
+    try { rssiRaw = await WifiManager.getCurrentSignalStrength(); } catch (e) {}
+    try { bssid = await WifiManager.getBSSID(); } catch (e) {}
+    try { freqRaw = await WifiManager.getFrequency(); } catch (e) {}
+
+    const rssi = typeof rssiRaw === 'number' ? rssiRaw : Number(rssiRaw);
+    const frequency = typeof freqRaw === 'number' ? freqRaw : Number(freqRaw) || 2400;
+
+    // Huawei: getCurrentSignalStrength() can return RSSI as 0-4 bars, or level 0-100, or raw dBm.
+    // Normalise: if value is 0-4 => map to dBm; if 0-100 => map; if negative => use as-is dBm.
+    let rssiNorm = NaN;
+    if (!isNaN(rssi)) {
+      if (rssi >= -100 && rssi < 0) {
+        rssiNorm = rssi; // already valid dBm
+      } else if (rssi >= 0 && rssi <= 4) {
+        // 0-4 bars → approximate dBm
+        rssiNorm = [-90, -75, -60, -50, -35][Math.round(rssi)] ?? -75;
+      } else if (rssi >= 0 && rssi <= 100) {
+        // 0-100 RSSI level → map to dBm
+        rssiNorm = -100 + rssi;
       }
-    } catch {}
+    }
+
+    log(`conn raw: ssid="${ssid}" rssi=${rssi}→${rssiNorm} bssid="${bssid}" freq=${frequency}`);
+
+    if (!isNaN(rssiNorm) && rssiNorm < 0 && rssiNorm >= -100) {
+      return {
+        ssid: ssid || '(connected)',
+        bssid: bssid || '',
+        rssi: rssiNorm,
+        frequency: frequency > 0 ? frequency : 2400,
+      };
+    }
     return null;
   }
 
-  /**
-   * 完整周边 AP 扫描。注意 Android 频率限制（4次/2分钟）。
-   */
   private async doFullScan(): Promise<WifiScanResult[]> {
     const parsed: WifiScanResult[] = [];
+    let raw: any[] = [];
 
     try {
-      let raw: any[] = [];
+      raw = (await WifiManager.reScanAndLoadWifiList()) as any[];
+    } catch {
       try {
-        raw = (await WifiManager.reScanAndLoadWifiList()) as any[];
+        raw = (await WifiManager.loadWifiList()) as any[];
       } catch {
-        try {
-          raw = (await WifiManager.loadWifiList()) as any[];
-        } catch {
-          return parsed;
-        }
+        return parsed;
       }
+    }
 
-      if (!Array.isArray(raw)) return parsed;
+    if (!Array.isArray(raw)) return parsed;
 
-      for (const r of raw) {
-        const level = (r as any).level;
-        let rssi = typeof level === 'number' ? level : NaN;
-        if (isNaN(rssi)) {
-          rssi = Number((r as any).rssi ?? NaN);
-        }
-        if (isNaN(rssi) || rssi < -100 || rssi > -10) continue;
+    for (const r of raw) {
+      const level = (r as any).level;
+      let rssi = typeof level === 'number' ? level : NaN;
+      if (isNaN(rssi)) rssi = Number((r as any).rssi ?? NaN);
+      if (isNaN(rssi) || rssi < -100 || rssi > -10) continue;
 
-        const ssid = ((r as any).SSID ?? (r as any).ssid ?? '').trim();
-        const bssid = (r as any).BSSID ?? (r as any).bssid ?? '';
-        const frequency = Number((r as any).frequency ?? 2400);
-
-        parsed.push({ ssid: ssid || '(unknown)', bssid, rssi, frequency });
-      }
-    } catch (err) {
-      console.warn('Full scan failed:', String(err));
+      const ssid = ((r as any).SSID ?? (r as any).ssid ?? '').trim();
+      parsed.push({
+        ssid: ssid || '(unknown)',
+        bssid: (r as any).BSSID ?? (r as any).bssid ?? '',
+        rssi,
+        frequency: Number((r as any).frequency ?? 2400),
+      });
     }
 
     parsed.sort((a, b) => b.rssi - a.rssi);
     return parsed;
   }
 
-  /**
-   * 合并 fast RSSI 和缓存的全扫描结果。
-   * 当前连接的 AP 项会被 fast RSSI 的值覆盖（更实时）。
-   */
-  private mergeResults(
-    current: WifiScanResult | null,
-    cached: WifiScanResult[],
-  ): WifiScanResult[] {
-    const merged = new Map<string, WifiScanResult>();
-
-    // Add cached full scan results
-    for (const r of cached) {
-      merged.set(r.bssid || r.ssid, r);
-    }
-
-    // Override with current connection
-    if (current) {
-      const key = current.bssid || current.ssid;
-      merged.set(key, current);
-    }
-
-    const result = Array.from(merged.values());
+  private mergeResults(conn: WifiScanResult[], cached: WifiScanResult[]): WifiScanResult[] {
+    const map = new Map<string, WifiScanResult>();
+    for (const r of cached) map.set(r.bssid || r.ssid, r);
+    for (const r of conn) map.set(r.bssid || r.ssid, r);
+    const result = Array.from(map.values());
     result.sort((a, b) => b.rssi - a.rssi);
     return result;
   }
 
   createSamples(
-    scanResults: WifiScanResult[],
+    results: WifiScanResult[],
     x: number,
     y: number,
     confidence: WifiSample['positionConfidence'] = 'pdr_high',
   ): WifiSample[] {
     const now = Date.now();
-    return scanResults
+    return results
       .filter((r) => !isNaN(r.rssi) && r.rssi > -100 && r.rssi <= -10)
       .map((r) => ({
         timestamp: now,

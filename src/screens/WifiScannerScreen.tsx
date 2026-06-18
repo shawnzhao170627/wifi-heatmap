@@ -10,6 +10,7 @@ import {
 import { Canvas, Path, Skia, Circle, Rect } from '@shopify/react-native-skia';
 import { useStore } from '../store/useStore';
 import { WifiScanner } from '../services/WifiScanner';
+import { debugLog } from '../services/WifiScanner';
 import { PedestrianTracker } from '../services/PedestrianTracker';
 import { locateRouter } from '../services/RouterLocator';
 import { rssiToColor } from '../services/HeatmapEngine';
@@ -35,6 +36,7 @@ export default function WifiScannerScreen({ route, navigation }: any) {
   const [pdrPosition, setPdrPosition] = useState({ x: 0, y: 0, heading: 0, stepCount: 0 });
   const [estimatedRouter, setEstimatedRouter] = useState<{ x: number; y: number; confidence: string } | null>(null);
   const [trail, setTrail] = useState<TrailPoint[]>([]);
+  const [, setDbgTick] = useState(0); // force re-render to show debug logs
 
   const wifiRef = useRef(new WifiScanner());
   const pdrRef = useRef<PedestrianTracker | null>(null);
@@ -83,20 +85,29 @@ export default function WifiScannerScreen({ route, navigation }: any) {
     scanTimerRef.current = setInterval(async () => {
       const results = await wifiRef.current.scan();
       const pdr = pdrRef.current?.getState();
-      if (!pdr) return;
-      const samples = wifiRef.current.createSamples(results, Math.round(pdr.x), Math.round(pdr.y), 'pdr_high');
+      const px = pdr?.x ?? startX;
+      const py = pdr?.y ?? startY;
+      const samples = wifiRef.current.createSamples(results, Math.round(px), Math.round(py), 'pdr_high');
+
       if (samples.length > 0) {
-        const { addSamples: add, updateScanSession: upd } = useStore.getState();
+        const { addSamples: add } = useStore.getState();
         add(projectId, samples);
         const best = samples.reduce((a, b) => (a.rssi > b.rssi ? a : b));
         setRssi(best.rssi);
-        // Append to trail — capped to MAX_TRAIL
+        setDbgTick((t) => t + 1);
         setTrail((prev) => {
-          const next = [...prev, { x: pdr.x, y: pdr.y, rssi: best.rssi }];
+          const next = [...prev, { x: px, y: py, rssi: best.rssi }];
           return next.length > MAX_TRAIL ? next.slice(-MAX_TRAIL) : next;
         });
-        upd({ currentPosition: { x: pdr.x, y: pdr.y }, currentHeading: pdr.heading, stepCount: pdr.stepCount, lastSampleTime: Date.now() });
+      } else {
+        // WiFi results empty but still update position trail (no RSSI color)
+        setTrail((prev) => {
+          const next = [...prev, { x: px, y: py, rssi: -99 }];
+          return next.length > MAX_TRAIL ? next.slice(-MAX_TRAIL) : next;
+        });
       }
+      const { updateScanSession: upd } = useStore.getState();
+      upd({ currentPosition: { x: px, y: py }, currentHeading: pdr?.heading ?? 0, stepCount: pdr?.stepCount ?? 0, lastSampleTime: Date.now() });
     }, 2000);
   }, [projectId, updateScanSession]);
 
@@ -270,6 +281,13 @@ export default function WifiScannerScreen({ route, navigation }: any) {
         {estimatedRouter && (
           <Text style={styles.estimateText}>已定位 · 置信度: {estimatedRouter.confidence}</Text>
         )}
+
+        {/* Debug log */}
+        <View style={styles.debugPanel}>
+          {debugLog.slice(-4).map((l, i) => (
+            <Text key={i} style={styles.debugText}>{l}</Text>
+          ))}
+        </View>
       </View>
 
       {/* Controls */}
@@ -332,4 +350,6 @@ const styles = StyleSheet.create({
   detectBtn: { marginTop: 12, backgroundColor: 'rgba(255,214,0,0.15)', borderWidth: 1, borderColor: '#FFD600', borderRadius: 8, padding: 10, alignItems: 'center' },
   detectBtnText: { fontSize: 14, fontWeight: '600', color: '#FFD600' },
   estimateText: { fontSize: 12, color: '#FFD600', textAlign: 'center', marginTop: 6 },
+  debugPanel: { marginTop: 8, paddingHorizontal: 4 },
+  debugText: { fontSize: 9, color: '#666', fontFamily: 'monospace', lineHeight: 12 },
 });
