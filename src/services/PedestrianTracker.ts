@@ -4,35 +4,29 @@ import {
   setUpdateIntervalForType,
   SensorTypes,
 } from 'react-native-sensors';
-import { type Observable, Subscription } from 'rxjs';
-import { map, filter } from 'rxjs/operators';
-
-export interface IMUData {
-  ax: number; // m/s²
-  ay: number;
-  az: number;
-  gx: number; // rad/s
-  gy: number;
-  gz: number;
-  timestamp: number;
-}
-
-export interface StepEvent {
-  timestamp: number;
-}
+import { type Subscription } from 'rxjs';
+import { map } from 'rxjs/operators';
 
 export interface PDRState {
-  x: number; // cm, current position
+  x: number;
   y: number;
-  heading: number; // radians, 0 = right/positive X
+  heading: number;
   stepCount: number;
 }
 
-const STEP_LENGTH_CM = 65; // average adult step length
-const STEP_THRESHOLD = 11.5; // acceleration magnitude threshold for step detection (m/s²)
-const STEP_COOLDOWN_MS = 250; // minimum time between steps
-const ACCEL_UPDATE_INTERVAL = 20; // ms, ~50Hz
-const GYRO_UPDATE_INTERVAL = 20; // ms
+// Real adult step: 50-80cm. Default 65cm.
+const STEP_LENGTH_CM = 65;
+
+// Lowered threshold: The raw acceleration magnitude from the phone
+// (including gravity) is about 9.8 at rest. Steps cause spikes to ~10.5-12.
+// Setting threshold to 10.8 catches most steps on average phones.
+const STEP_THRESHOLD = 10.8;
+
+// Minimum 200ms between steps (max 5 steps/sec)
+const STEP_COOLDOWN_MS = 200;
+
+// ~30 Hz for both sensors
+const SENSOR_INTERVAL_MS = 33;
 
 export class PedestrianTracker {
   private accelSub: Subscription | null = null;
@@ -40,6 +34,7 @@ export class PedestrianTracker {
   private state: PDRState;
   private lastStepTime = 0;
   private listeners: Array<(state: PDRState) => void> = [];
+  private started = false;
 
   constructor(initialX = 0, initialY = 0, initialHeading = 0) {
     this.state = {
@@ -51,35 +46,63 @@ export class PedestrianTracker {
   }
 
   start(): void {
-    setUpdateIntervalForType(SensorTypes.accelerometer, ACCEL_UPDATE_INTERVAL);
-    setUpdateIntervalForType(SensorTypes.gyroscope, GYRO_UPDATE_INTERVAL);
+    if (this.started) return;
+    this.started = true;
 
-    this.accelSub = accelerometer
-      .pipe(
-        map(({ x, y, z }) => ({
-          ax: x,
-          ay: y,
-          az: z,
-          timestamp: Date.now(),
-        })),
-      )
-      .subscribe((data) => this.processAccel(data));
+    try {
+      setUpdateIntervalForType(SensorTypes.accelerometer, SENSOR_INTERVAL_MS);
+      setUpdateIntervalForType(SensorTypes.gyroscope, SENSOR_INTERVAL_MS);
+    } catch (e) {
+      // Ignore — default rate will be used
+    }
 
-    this.gyroSub = gyroscope
-      .pipe(
-        map(({ x, y, z }) => ({
-          x,
-          y,
-          z,
-          timestamp: Date.now(),
-        })),
-      )
-      .subscribe((gyro) => this.processGyro(gyro));
+    try {
+      this.accelSub = accelerometer
+        .pipe(
+          map(({ x, y, z }: any) => ({
+            ax: x,
+            ay: y,
+            az: z,
+            timestamp: Date.now(),
+          })),
+        )
+        .subscribe({
+          next: (data) => this.processAccel(data),
+          error: () => {
+            // Sensor not available — silently degrade
+          },
+        });
+    } catch (e) {
+      // Sensor init failed
+    }
+
+    try {
+      this.gyroSub = gyroscope
+        .pipe(
+          map(({ x, y, z }: any) => ({
+            x,
+            y,
+            z,
+            timestamp: Date.now(),
+          })),
+        )
+        .subscribe({
+          next: (gyro) => this.processGyro(gyro),
+          error: () => {
+            // Sensor not available — silently degrade
+          },
+        });
+    } catch (e) {
+      // Sensor init failed
+    }
   }
 
   stop(): void {
-    this.accelSub?.unsubscribe();
-    this.gyroSub?.unsubscribe();
+    this.started = false;
+    try {
+      this.accelSub?.unsubscribe();
+      this.gyroSub?.unsubscribe();
+    } catch {}
     this.accelSub = null;
     this.gyroSub = null;
   }
@@ -112,6 +135,7 @@ export class PedestrianTracker {
   }
 
   private processAccel(data: { ax: number; ay: number; az: number; timestamp: number }): void {
+    // Magnitude of raw accelerometer (includes gravity)
     const magnitude = Math.sqrt(
       data.ax * data.ax + data.ay * data.ay + data.az * data.az,
     );
@@ -123,7 +147,6 @@ export class PedestrianTracker {
       this.lastStepTime = data.timestamp;
       this.state.stepCount += 1;
 
-      // Update position based on heading
       const rad = this.state.heading;
       this.state.x += STEP_LENGTH_CM * Math.cos(rad);
       this.state.y += STEP_LENGTH_CM * Math.sin(rad);
@@ -134,11 +157,10 @@ export class PedestrianTracker {
 
   private processGyro(data: { x: number; y: number; z: number; timestamp: number }): void {
     // Integrate Z-axis gyro for heading change
-    // Apply high-pass filter: ignore very small rotations to reduce drift
-    const threshold = 0.01; // rad/s
+    // Use lower threshold (0.005 rad/s) so subtle turning is detected
+    const threshold = 0.005;
     if (Math.abs(data.z) > threshold) {
-      this.state.heading += data.z * (GYRO_UPDATE_INTERVAL / 1000);
-      // Normalize to [-π, π]
+      this.state.heading += data.z * (SENSOR_INTERVAL_MS / 1000);
       while (this.state.heading > Math.PI) this.state.heading -= 2 * Math.PI;
       while (this.state.heading < -Math.PI) this.state.heading += 2 * Math.PI;
     }
